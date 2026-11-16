@@ -5,8 +5,13 @@ import time
 
 DB_FILE = "data.db"
 
-# Custom in-memory index: [key, value, expiration]
+# Custom list-based index
 records = []
+
+# Transaction state
+transaction_active = False
+transaction_backup = []
+transaction_log = []
 
 
 def find_key(key):
@@ -53,38 +58,52 @@ def append_log(entry):
         os.fsync(file.fileno())
 
 
+def apply_entry(entry):
+    if not isinstance(entry, list):
+        return
+
+    if len(entry) == 4 and entry[0] == "SET":
+        update_index(entry[1], entry[2], entry[3])
+
+    elif len(entry) == 3 and entry[0] == "EXPIRE":
+        index = find_key(entry[1])
+        if index != -1:
+            records[index][2] = entry[2]
+
+    elif len(entry) == 2 and entry[0] == "DEL":
+        remove_index(entry[1])
+
+    elif len(entry) == 2 and entry[0] == "TX":
+        for operation in entry[1]:
+            apply_entry(operation)
+
+    elif len(entry) == 2:
+        # Compatibility with original SET records
+        update_index(entry[0], entry[1])
+
+
 def load_database():
+    records.clear()
     open(DB_FILE, "a", encoding="utf-8").close()
 
     with open(DB_FILE, "r", encoding="utf-8") as file:
         for line in file:
             try:
                 entry = json.loads(line)
-
-                if not isinstance(entry, list):
-                    continue
-
-                if len(entry) == 4 and entry[0] == "SET":
-                    update_index(entry[1], entry[2], entry[3])
-
-                elif len(entry) == 3 and entry[0] == "EXPIRE":
-                    index = find_key(entry[1])
-                    if index != -1:
-                        records[index][2] = entry[2]
-
-                elif len(entry) == 2 and entry[0] == "DEL":
-                    remove_index(entry[1])
-
-                elif len(entry) == 2:
-                    
-                    update_index(entry[0], entry[1])
-
+                apply_entry(entry)
             except (ValueError, TypeError, IndexError):
                 continue
 
 
+def save_operation(entry):
+    if transaction_active:
+        transaction_log.append(entry)
+    else:
+        append_log(entry)
+
+
 def set_key(key, value, show_output=True):
-    append_log(["SET", key, value, None])
+    save_operation(["SET", key, value, None])
     update_index(key, value)
 
     if show_output:
@@ -93,6 +112,7 @@ def set_key(key, value, show_output=True):
 
 def get_key(key):
     record = get_record(key)
+
     if record is None:
         print("NULL")
     else:
@@ -104,7 +124,7 @@ def delete_key(key):
         print("0")
         return
 
-    append_log(["DEL", key])
+    save_operation(["DEL", key])
     remove_index(key)
     print("1")
 
@@ -114,19 +134,8 @@ def exists_key(key):
 
 
 def mset_keys(pairs):
-    entries = []
-
     for index in range(0, len(pairs), 2):
-        entries.append(["SET", pairs[index], pairs[index + 1], None])
-
-    with open(DB_FILE, "a", encoding="utf-8") as file:
-        for entry in entries:
-            file.write(json.dumps(entry) + "\n")
-        file.flush()
-        os.fsync(file.fileno())
-
-    for entry in entries:
-        update_index(entry[1], entry[2])
+        set_key(pairs[index], pairs[index + 1], False)
 
     print("OK")
 
@@ -142,7 +151,7 @@ def expire_key(key, seconds):
         return
 
     expiration = time.time() + seconds
-    append_log(["EXPIRE", key, expiration])
+    save_operation(["EXPIRE", key, expiration])
 
     index = find_key(key)
     records[index][2] = expiration
@@ -176,6 +185,53 @@ def range_keys(start, end):
 
     for record in matches:
         print(record[0], record[1])
+
+
+def begin_transaction():
+    global transaction_active, transaction_backup, transaction_log
+
+    if transaction_active:
+        print("ERROR")
+        return
+
+    transaction_backup = [record[:] for record in records]
+    transaction_log = []
+    transaction_active = True
+    print("OK")
+
+
+def commit_transaction():
+    global transaction_active, transaction_backup, transaction_log
+
+    if not transaction_active:
+        print("ERROR")
+        return
+
+    if transaction_log:
+        append_log(["TX", transaction_log])
+
+    transaction_active = False
+    transaction_backup = []
+    transaction_log = []
+    print("OK")
+
+
+def abort_transaction():
+    global transaction_active, transaction_backup, transaction_log
+
+    if not transaction_active:
+        print("ERROR")
+        return
+
+    records.clear()
+
+    for record in transaction_backup:
+        records.append(record[:])
+
+    transaction_active = False
+    transaction_backup = []
+    transaction_log = []
+    print("OK")
 
 
 def main():
@@ -222,6 +278,15 @@ def main():
 
         elif action == "RANGE" and len(parts) == 3:
             range_keys(parts[1], parts[2])
+
+        elif action == "BEGIN" and len(parts) == 1:
+            begin_transaction()
+
+        elif action == "COMMIT" and len(parts) == 1:
+            commit_transaction()
+
+        elif action == "ABORT" and len(parts) == 1:
+            abort_transaction()
 
         elif action == "EXIT" and len(parts) == 1:
             break
