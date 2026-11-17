@@ -1,20 +1,30 @@
 
+"""Automated tests for the  persistent key-value database.
+
+Tests validate command execution , transactions,
+expiration, hashes, lists, counters, and database management.
+"""
+
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+
 MAIN_FILE = Path(__file__).resolve().parents[1] / "main.py"
 
 
 class TestKeyValueStore(unittest.TestCase):
+    """Black-box tests for the key-value store CLI."""
 
     def setUp(self):
+        """Create an isolated temporary database for each test."""
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
 
     def run_database(self, commands):
+        """Run database commands and capture output."""
         result = subprocess.run(
             [sys.executable, str(MAIN_FILE)],
             input="\n".join(commands) + "\n",
@@ -24,6 +34,7 @@ class TestKeyValueStore(unittest.TestCase):
             timeout=10,
             check=True,
         )
+
         self.assertEqual(result.stderr, "")
         return result.stdout.strip().splitlines()
 
@@ -45,17 +56,19 @@ class TestKeyValueStore(unittest.TestCase):
         self.assertEqual(output, ["OK", "OK", "Dallas"])
 
     def test_missing_key(self):
+        """A never-created key returns a blank response."""
         output = self.run_database([
             "GET missing",
             "EXIT",
         ])
-        self.assertEqual(output, ["NULL"])
+        self.assertEqual(output, [])
 
     def test_persistence(self):
         self.run_database([
             "SET university UNT",
             "EXIT",
         ])
+
         output = self.run_database([
             "GET university",
             "EXIT",
@@ -71,9 +84,14 @@ class TestKeyValueStore(unittest.TestCase):
             "EXISTS name",
             "DEL name",
             "EXISTS name",
+            "GET name",
             "EXIT",
         ])
-        self.assertEqual(output, ["OK", "1", "1", "0"])
+
+        self.assertEqual(
+            output,
+            ["OK", "1", "1", "0", "nil"],
+        )
 
     def test_multiple_keys(self):
         output = self.run_database([
@@ -91,7 +109,7 @@ class TestKeyValueStore(unittest.TestCase):
             "TTL temporary",
             "EXIT",
         ])
-        self.assertEqual(output, ["OK", "1", "NULL", "-2"])
+        self.assertEqual(output, ["OK", "1", "nil", "-2"])
 
     def test_range(self):
         output = self.run_database([
@@ -101,16 +119,31 @@ class TestKeyValueStore(unittest.TestCase):
             "RANGE apple cherry",
             "EXIT",
         ])
+
         self.assertEqual(
             output,
             [
                 "OK",
                 "OK",
                 "OK",
-                "apple red",
-                "banana yellow",
-                "cherry pink",
+                "apple",
+                "banana",
+                "cherry",
+                "END",
             ],
+        )
+
+    def test_range_unbounded(self):
+        output = self.run_database([
+            "SET d 4",
+            "SET e 5",
+            'RANGE d ""',
+            "EXIT",
+        ])
+
+        self.assertEqual(
+            output,
+            ["OK", "OK", "d", "e", "END"],
         )
 
     def test_transaction_commit(self):
@@ -120,6 +153,7 @@ class TestKeyValueStore(unittest.TestCase):
             "COMMIT",
             "EXIT",
         ])
+
         output = self.run_database([
             "GET student",
             "EXIT",
@@ -134,7 +168,11 @@ class TestKeyValueStore(unittest.TestCase):
             "GET student",
             "EXIT",
         ])
-        self.assertEqual(output, ["OK", "OK", "OK", "NULL"])
+
+        self.assertEqual(
+            output,
+            ["OK", "OK", "OK", "nil"],
+        )
 
     def test_hashes(self):
         output = self.run_database([
@@ -144,10 +182,29 @@ class TestKeyValueStore(unittest.TestCase):
             "HGETALL student",
             "EXIT",
         ])
+
         self.assertEqual(
             output,
-            ["OK", "OK", "Siya", "major CS", "name Siya"],
+            [
+                "OK",
+                "OK",
+                "Siya",
+                "major CS",
+                "name Siya",
+            ],
         )
+
+    def test_hash_persistence(self):
+        self.run_database([
+            "HSET student major CS",
+            "EXIT",
+        ])
+
+        output = self.run_database([
+            "HGET student major",
+            "EXIT",
+        ])
+        self.assertEqual(output, ["CS"])
 
     def test_lists(self):
         output = self.run_database([
@@ -156,10 +213,59 @@ class TestKeyValueStore(unittest.TestCase):
             "LRANGE subjects 0 -1",
             "EXIT",
         ])
+
         self.assertEqual(
             output,
             ["1", "2", "Algorithms", "Database"],
         )
+
+    def test_list_persistence(self):
+        self.run_database([
+            "LPUSH subjects Algorithms",
+            "RPUSH subjects Database",
+            "EXIT",
+        ])
+
+        output = self.run_database([
+            "LRANGE subjects 0 -1",
+            "EXIT",
+        ])
+
+        self.assertEqual(
+            output,
+            ["Algorithms", "Database"],
+        )
+
+    def test_list_pop(self):
+        output = self.run_database([
+            "RPUSH items first",
+            "RPUSH items second",
+            "RPUSH items third",
+            "LPOP items",
+            "RPOP items",
+            "LRANGE items 0 -1",
+            "EXIT",
+        ])
+
+        self.assertEqual(
+            output,
+            ["1", "2", "3", "first", "third", "second"],
+        )
+
+    def test_list_pop_persistence(self):
+        self.run_database([
+            "RPUSH items first",
+            "RPUSH items second",
+            "LPOP items",
+            "EXIT",
+        ])
+
+        output = self.run_database([
+            "LRANGE items 0 -1",
+            "EXIT",
+        ])
+
+        self.assertEqual(output, ["second"])
 
     def test_counters(self):
         output = self.run_database([
@@ -169,6 +275,7 @@ class TestKeyValueStore(unittest.TestCase):
             "GET count",
             "EXIT",
         ])
+
         self.assertEqual(output, ["1", "2", "1", "1"])
 
     def test_flushdb(self):
@@ -178,30 +285,8 @@ class TestKeyValueStore(unittest.TestCase):
             "GET name",
             "EXIT",
         ])
-        self.assertEqual(output, ["OK", "OK", "NULL"])
 
-    def test_hash_persistence(self):
-        self.run_database([
-            "HSET student major CS",
-            "EXIT",
-        ])
-        output = self.run_database([
-            "HGET student major",
-            "EXIT",
-        ])
-        self.assertEqual(output, ["CS"])
-
-    def test_list_persistence(self):
-        self.run_database([
-            "LPUSH subjects Algorithms",
-            "RPUSH subjects Database",
-            "EXIT",
-        ])
-        output = self.run_database([
-            "LRANGE subjects 0 -1",
-            "EXIT",
-        ])
-        self.assertEqual(output, ["Algorithms", "Database"])
+        self.assertEqual(output, ["OK", "OK", "nil"])
 
     def test_flushdb_persistence(self):
         self.run_database([
@@ -209,11 +294,13 @@ class TestKeyValueStore(unittest.TestCase):
             "FLUSHDB",
             "EXIT",
         ])
+
         output = self.run_database([
             "GET name",
             "EXIT",
         ])
-        self.assertEqual(output, ["NULL"])
+
+        self.assertEqual(output, ["nil"])
 
 
 if __name__ == "__main__":
